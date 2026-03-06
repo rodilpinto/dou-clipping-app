@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+app_camara.py
+.streamlit/config_camara.toml
