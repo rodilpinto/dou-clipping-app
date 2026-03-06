@@ -100,4 +100,4 @@ Os 44 termos padrão cobrem temas de auditoria, TI, governanca e controle. Na si
 
 ## Autor
 
-Rodrigo de Andrade — NUATI/SECIN, Camara dos Deputados
+NUATI/SECIN — Camara dos Deputados

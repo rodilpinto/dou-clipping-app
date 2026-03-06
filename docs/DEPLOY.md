@@ -9,7 +9,7 @@
 ## Passo 1: Criar repositorio no GitHub
 
 ```bash
-cd C:\Users\Rodrigo\Documents\projeto-nuati-DOU\dou-clipping-app
+cd dou-clipping-app
 
 # Inicializar git
 git init

@@ -498,7 +498,7 @@ def generate_email_body(
     terms_display: str | None = None,
 ) -> str:
     """
-    Gera corpo de email HTML no formato do Rodrigo:
+    Gera corpo de email HTML formatado:
     - Lista corrida ordenada por data
     - Metadados: Publicado em | Edição | Seção | Página
     - Órgão
