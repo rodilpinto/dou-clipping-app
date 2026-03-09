@@ -23,6 +23,22 @@ from dou_clipping import (
     search_all_terms,
 )
 
+APP_VERSION = "1.0"
+APP_AUTHOR = "Rodrigo Pinto"
+
+# Estimativa de tempo manual por termo de busca (em segundos):
+# abrir pesquisa, digitar termo, configurar filtros, analisar resultados
+_SECS_PER_TERM = 35
+# Overhead fixo: agregar resultados + deduplicar + formatar relatorio
+_SECS_OVERHEAD = 300  # 5 min
+
+
+def _estimate_time_saved(num_terms: int, num_dates: int = 1) -> int:
+    """Retorna estimativa de minutos economizados por busca automatizada."""
+    total_secs = (num_terms * _SECS_PER_TERM + _SECS_OVERHEAD) * num_dates
+    return round(total_secs / 60)
+
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -88,6 +104,10 @@ if "search_done" not in st.session_state:
     st.session_state["search_done"] = False
 if "search_terms" not in st.session_state:
     st.session_state["search_terms"] = None  # Will be loaded in sidebar
+if "total_searches" not in st.session_state:
+    st.session_state["total_searches"] = 0
+if "total_minutes_saved" not in st.session_state:
+    st.session_state["total_minutes_saved"] = 0
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +393,13 @@ if buscar and data_inicial <= data_final:
     st.session_state["results"] = all_items
     st.session_state["search_done"] = True
     _init_checkboxes()
+
+    # Contabilizar tempo economizado
+    num_terms = len(st.session_state["search_terms"] or [])
+    num_dates = len(dates)
+    minutes_saved = _estimate_time_saved(num_terms, num_dates)
+    st.session_state["total_searches"] += 1
+    st.session_state["total_minutes_saved"] += minutes_saved
 
 # ---------------------------------------------------------------------------
 # Lista de resultados
@@ -674,3 +701,40 @@ elif not st.session_state["search_done"]:
         '</div>',
         unsafe_allow_html=True,
     )
+
+# ---------------------------------------------------------------------------
+# Rodape
+# ---------------------------------------------------------------------------
+_num_terms = len(st.session_state.get("search_terms") or SEARCH_TERMS)
+_minutes_per_search = _estimate_time_saved(_num_terms)
+
+# Texto de economia acumulada na sessao
+_total_searches = st.session_state.get("total_searches", 0)
+_total_saved = st.session_state.get("total_minutes_saved", 0)
+
+if _total_saved >= 60:
+    _saved_display = f"{_total_saved // 60}h{_total_saved % 60:02d}min"
+else:
+    _saved_display = f"{_total_saved} min"
+
+if _total_searches > 0:
+    _economy_line = (
+        f"Tempo economizado nesta sessao: <b>{_saved_display}</b> "
+        f"({_total_searches} busca(s) · ~{_minutes_per_search} min cada)"
+    )
+else:
+    _economy_line = (
+        f"Cada busca automatiza ~<b>{_minutes_per_search} min</b> de trabalho manual "
+        f"({_num_terms} termos pesquisados automaticamente)"
+    )
+
+st.markdown(
+    f"""
+    <hr style="border:1px solid #c8a41544;margin-top:40px;">
+    <div style="text-align:center;padding:12px 0 20px 0;color:#888;font-size:13px;">
+        <p style="margin:2px 0;">{_economy_line}</p>
+        <p style="margin:2px 0;">Feito por <b>{APP_AUTHOR}</b> · Versao {APP_VERSION}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
