@@ -125,6 +125,15 @@ if "llm_classifications" not in st.session_state:
     st.session_state["llm_classifications"] = []
 if "llm_filtered" not in st.session_state:
     st.session_state["llm_filtered"] = False
+if "llm_pending_apply" not in st.session_state:
+    st.session_state["llm_pending_apply"] = False
+
+# Apply pending LLM classifications BEFORE any widgets are created
+if st.session_state["llm_pending_apply"]:
+    for cls in st.session_state.get("llm_classifications", []):
+        if cls["classificacao"] == "NAO_RELEVANTE":
+            st.session_state[f"sel_{cls['index']}"] = False
+    st.session_state["llm_pending_apply"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -661,13 +670,9 @@ if st.session_state["search_done"] and results:
                         if idx < len(results) - 1:
                             time.sleep(1)
 
-                    # Apply: uncheck NAO_RELEVANTE
-                    for cls in classifications:
-                        if cls["classificacao"] == "NAO_RELEVANTE":
-                            st.session_state[f"sel_{cls['index']}"] = False
-
                     st.session_state["llm_classifications"] = classifications
                     st.session_state["llm_filtered"] = True
+                    st.session_state["llm_pending_apply"] = True
 
                     n_relevant = sum(1 for c in classifications if c["classificacao"] == "RELEVANTE")
                     n_partial = sum(1 for c in classifications if c["classificacao"] == "PARCIALMENTE_RELEVANTE")
