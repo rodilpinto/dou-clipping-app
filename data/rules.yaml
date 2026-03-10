@@ -1,0 +1,298 @@
+# =============================================================================
+# REGRAS DE BUSCA E FILTRAGEM — DOU Clipping NUATI
+# =============================================================================
+# Este arquivo é a referência central do script Python.
+# Atualizado regularmente pela equipe NUATI.
+#
+# Como editar:
+#   - Diretamente neste arquivo (YAML legível)
+#   - Ou pedir ao Claude para atualizar
+#   - Mudanças simples: adicionar/remover termos, ligar/desligar regras
+#   - Mudanças estruturais: pedir ao Claude
+# =============================================================================
+
+
+# =============================================================================
+# TERMOS DE BUSCA EXATOS (para API do DOU — busca por frase exata)
+# =============================================================================
+termos_busca:
+  # --- Câmara dos Deputados (termo especial: usado em Seção 2 e 3) ---
+  - "Câmara dos Deputados"
+
+  # --- Tecnologia e TI ---
+  - "Tecnologia da informação"
+  - "Tecnologia da Informação e Comunicação"
+  - "Soluções de TI"
+  - "Soluções de TIC"
+  - "Transformação digital"
+  - "Inovação tecnológica"
+  - "Computação em nuvem"
+
+  # --- Auditoria ---
+  - "Auditoria de TI"
+  - "Auditoria de TIC"
+  - "Auditoria interna"
+  - "AudTI"
+
+  # --- Frameworks e padrões ---
+  - "COSO"
+  - "COBIT"
+  - "Itil"
+  - "BPM"
+
+  # --- Governança ---
+  - "Governança corporativa"
+  - "Governança de TI"
+  - "Governança de TIC"
+  - "Governança de aquisições"
+  - "Governança de contratações"
+  - "Governança digital"
+
+  # --- Gestão e fiscalização ---
+  - "Gestão de aquisições"
+  - "Gestão de contratações"
+  - "Gestão de contratos"
+  - "Fiscalização de contratos"
+  - "Fiscal de contrato"
+
+  # --- Controle ---
+  - "Controle interno"
+  - "Controles internos"
+  - "Controladoria"
+  - "Indicadores"
+
+  # --- Risco e continuidade ---
+  - "Riscos"
+  - "Gestão de riscos"
+  - "Processos críticos"
+  - "Continuidade de negócios"
+
+  # --- Segurança ---
+  - "Segurança de informação"
+  - "Segurança da informação"
+  - "Cibersegurança"
+  - "Segurança cibernética"
+
+  # --- Processos ---
+  - "Gestão de processos"
+  - "Melhoria de processos"
+
+  # --- Dados e transparência ---
+  - "Dados abertos"
+  - "Dados em formatos abertos"
+  - "Proteção de dados"
+  - "LGPD"
+  - "Transparência da informação"
+  - "Lei de Acesso à Informação"
+  - "LAI"
+
+  # --- Software e métricas ---
+  - "Fábrica de Software"
+  - "Ponto de função"
+  - "Pontos de função"
+  - "Processo de software"
+
+  # --- Segurança ofensiva/defensiva ---
+  - "Hackers"
+  - "Hacktivismo"
+
+  # --- Órgãos de controle ---
+  - "Secretaria de Fiscalização de Tecnologia da Informação"
+  - "Sefti"
+
+  # --- Inteligência artificial e ciência de dados ---
+  - "Inteligência artificial"
+  - "Ciência de dados"
+  - "Aprendizado de máquina"
+  - "Machine learning"
+
+  # --- Compliance ---
+  - "Compliance"
+  - "Conformidade"
+
+
+# =============================================================================
+# RADICAIS (para busca local: Boletim Administrativo e texto completo)
+# Usados com regex para capturar variações morfológicas.
+# Não são enviados à API — são aplicados no texto já baixado.
+# =============================================================================
+radicais:
+  - radical: "auditor"
+    descricao: "auditoria, auditor, auditores, auditado, auditorias"
+  - radical: "governanç"
+    descricao: "governança"
+  - radical: "control"
+    descricao: "controle, controles, controlador, controladoria"
+  - radical: "fiscaliz"
+    descricao: "fiscalização, fiscalizar, fiscalizados, fiscal"
+  - radical: "seguranç"
+    descricao: "segurança"
+  - radical: "risc"
+    descricao: "risco, riscos"
+  - radical: "cibern"
+    descricao: "cibernético, cibernética, cibersegurança"
+  - radical: "inteligên"
+    descricao: "inteligência, inteligente"
+  - radical: "licitaç"
+    descricao: "licitação, licitações"
+  - radical: "contrat"
+    descricao: "contrato, contratos, contratação, contratações, contratado"
+  - radical: "tecnolog"
+    descricao: "tecnologia, tecnológico, tecnológica"
+  - radical: "digit"
+    descricao: "digital, digitais, digitalização"
+  - radical: "inovaç"
+    descricao: "inovação, inovações"
+  - radical: "complian"
+    descricao: "compliance"
+  - radical: "conformid"
+    descricao: "conformidade"
+
+
+# =============================================================================
+# REGRAS POR SEÇÃO DO DOU
+# =============================================================================
+secoes:
+  secao_1:
+    habilitada: true
+    descricao: "Atos normativos — buscar todos os termos"
+    buscar_todos_termos: true
+    buscar_texto_completo: true
+    subsecoes: ["do1", "do1e"]
+
+  secao_2:
+    habilitada: true
+    descricao: "Atos de pessoal — buscar apenas regras específicas de nomeação"
+    subsecoes: ["do2", "do2e"]
+    # NÃO busca todos os termos. Busca "Câmara dos Deputados" e filtra.
+    regras:
+      - id: nomeacoes_ditec_fc3
+        descricao: "Nomeações titular FC 3 ou superior na Ditec"
+        termo_busca: "Câmara dos Deputados"
+        filtro:
+          texto_contem_qualquer:
+            - "DITEC"
+            - "Departamento de Inovação e Tecnologia da Informação"
+            - "Departamento de Inovação e Tecnologia"
+            - "Diretoria de Inovação e Tecnologia"
+          padrao_fc: "FC[- ]?[3-9]|FC[- ]?1[0-9]"
+
+      - id: nomeacoes_cd_fc4
+        descricao: "Nomeações FC 4 ou superior no restante da Câmara"
+        termo_busca: "Câmara dos Deputados"
+        filtro:
+          texto_contem_qualquer:
+            - "Câmara dos Deputados"
+          texto_nao_contem:
+            - "DITEC"
+            - "Departamento de Inovação e Tecnologia"
+          padrao_fc: "FC[- ]?[4-9]|FC[- ]?1[0-9]"
+
+  secao_3:
+    habilitada: true
+    descricao: "Contratos e licitações — apenas 'Câmara dos Deputados'"
+    subsecoes: ["do3", "do3e"]
+    termos_filtro: ["Câmara dos Deputados"]
+
+  boletim_administrativo:
+    habilitado: true
+    descricao: "Boletim Administrativo da Câmara dos Deputados (PDF)"
+    texto_max_chars: 5000
+
+
+# =============================================================================
+# REGRAS POSITIVAS (para incluir — mesmo fora dos termos de busca)
+# =============================================================================
+regras_positivas:
+  - id: tcu_acordaos_cd
+    descricao: >
+      Todos os acórdãos do TCU cujo objeto é a Câmara dos Deputados
+      ou que contenham recomendações/determinações para a CD
+      (seja TI ou não).
+    secoes: ["do1", "do1e"]
+    filtro:
+      orgao_contem:
+        - "Tribunal de Contas da União"
+        - "TCU"
+      texto_contem_qualquer:
+        - "Câmara dos Deputados"
+      tipo_ato:
+        - "Acórdão"
+    acao: incluir_sempre
+
+
+# =============================================================================
+# REGRAS NEGATIVAS (para excluir da Etapa 1)
+# =============================================================================
+# Adicionar aqui padrões que devem ser excluídos automaticamente.
+# Exemplo:
+#   - id: editais_municipais
+#     descricao: "Editais de prefeituras municipais"
+#     filtro:
+#       orgao_contem: ["Prefeitura Municipal"]
+#     acao: excluir
+regras_negativas: []
+
+
+# =============================================================================
+# SPLIT DE ATOS COMPOSTOS
+# =============================================================================
+# Quando uma publicação contém múltiplos atos (ex: lote de acórdãos TCU,
+# extratos de licitação), o script divide em atos individuais.
+split_atos:
+  habilitado: true
+  padroes:
+    - tipo: "acordao_tcu"
+      descricao: "Acórdãos do TCU publicados em lote"
+      regex_separador: "(?=ACÓRDÃO\\s+(?:Nº\\s*)?\\d+)"
+      titulo_regex: "ACÓRDÃO\\s+(?:Nº\\s*)?(\\d+[/-]\\d+)"
+
+    - tipo: "extrato_contrato"
+      descricao: "Extratos de contrato/licitação em lote"
+      regex_separador: "(?=EXTRATO\\s+DE\\s+)"
+      titulo_regex: "(EXTRATO\\s+DE\\s+[^.\\n]+)"
+
+    - tipo: "portaria_lote"
+      descricao: "Portarias publicadas em lote"
+      regex_separador: "(?=PORTARIA\\s+(?:Nº\\s*)?\\d+)"
+      titulo_regex: "PORTARIA\\s+(?:Nº\\s*)?(\\d+)"
+
+
+# =============================================================================
+# CONFIGURAÇÃO DE DISPLAY
+# =============================================================================
+display:
+  # No toggle de texto completo: quantos chars mostrar antes e depois do termo
+  contexto_chars_antes: 300
+  contexto_chars_depois: 300
+  # Limite total de texto no toggle
+  toggle_max_chars: 2000
+  # Limite de texto no relatório HTML
+  relatorio_max_chars: 5000
+  # Limite do abstract/ementa
+  resumo_max_chars: 500
+
+
+# =============================================================================
+# LLM — Configuração para Etapa 2 (filtragem semântica)
+# =============================================================================
+llm:
+  # Provider inicial: Gemini Flash 2.5 (gratuito)
+  provider: "gemini"
+  modelo: "gemini-2.5-flash"
+  # API key via st.secrets["GEMINI_API_KEY"] ou variável de ambiente
+
+  # Módulo de enriquecimento de termos (Etapa 1, opcional)
+  enriquecimento:
+    habilitado: true
+    descricao: >
+      Botão opcional que usa LLM para sugerir novos termos de busca
+      baseado no contexto de auditoria de TI no setor público.
+
+  # Módulo de filtragem semântica (Etapa 2, opcional)
+  filtragem:
+    habilitado: true
+    descricao: >
+      Botão que aciona LLM para analisar semanticamente cada resultado
+      e classificar relevância. Itens filtrados ficam em aba separada.
+    manter_filtrados: true
