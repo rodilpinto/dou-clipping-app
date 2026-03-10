@@ -9,6 +9,7 @@ import logging
 import time
 import re
 import io
+from copy import deepcopy
 from datetime import datetime
 from random import random
 from typing import List, Dict, Optional
@@ -16,6 +17,20 @@ from typing import List, Dict, Optional
 import requests
 from bs4 import BeautifulSoup
 import pdfplumber
+
+from rules_engine import (
+    get_search_terms,
+    get_stems,
+    get_stem_patterns,
+    get_section_config,
+    get_secao2_rules,
+    get_positive_rules,
+    get_negative_rules,
+    get_split_patterns,
+    get_display_config,
+    get_terms_display,
+    get_all_match_patterns,
+)
 
 # API URLs
 IN_WEB_BASE_URL = "https://www.in.gov.br/web/dou/-/"
@@ -30,103 +45,306 @@ SECTION_DISPLAY = {
     "do2_extra_a": "2 - Extra A", "do3_extra_a": "3 - Extra A",
 }
 
-# Termos de busca
-SEARCH_TERMS = [
-    "Câmara dos Deputados",
-    "Tecnologia da informação",
-    "Auditoria de TI",
-    "Auditoria de TIC",
-    "Auditoria interna",
-    "COSO",
-    "Controle interno",
-    "Controles internos",
-    "COBIT",
-    "Indicadores",
-    "Itil",
-    "BPM",
-    "Governança corporativa",
-    "Governança de TI",
-    "Governança de aquisições",
-    "Governança de contratações",
-    "Gestão de aquisições",
-    "Gestão de contratações",
-    "Gestão de contratos",
-    "Fiscalização de contratos",
-    "Riscos",
-    "Segurança de informação",
-    "Segurança da informação",
-    "Gestão de processos",
-    "Melhoria de processos",
-    "Dados abertos",
-    "Dados em formatos abertos",
-    "Fábrica de Software",
-    "Ponto de função",
-    "Pontos de função",
-    "Processo de software",
-    "Soluções de TI",
-    "Hackers",
-    "Hacktivismo",
-    "Processos críticos",
-    "Continuidade de negócios",
-    "Secretaria de Fiscalização de Tecnologia da Informação",
-    "Sefti",
-    "AudTI",
-    "Transparência da informação",
-    "Lei de Acesso à Informação",
-    "LAI",
-    "Inteligência artificial",
-    "Ciência de dados",
-]
+# Termos de busca — carregados de rules.yaml via rules_engine
+SEARCH_TERMS = get_search_terms()
 
 # Lista legível das palavras-chave para o rodapé
-SEARCH_TERMS_DISPLAY = """Tecnologia da informação
-Auditoria de TI
-Auditoria de TIC
-Auditoria interna
-COSO
-Controle(s) interno(s)
-COBIT
-Indicadores
-Itil
-BPM
-Governança corporativa
-Governança de TI
-Governança de aquisições
-Governança de contratações
-Gestão de aquisições
-Gestão de contratações
-Gestão de contratos
-Fiscalização de contratos
-Riscos
-Segurança de informação
-Segurança da informação
-Gestão de processos
-Melhoria de processos
-Dados abertos
-Dados em formatos abertos
-Fábrica de Software
-Ponto(s) de função
-Processo de software
-Soluções de TI
-Hackers
-Hacktivismo
-Processos críticos
-Continuidade de negócios
-Secretaria de Fiscalização de Tecnologia da Informação
-Sefti/TCU
-AudTI
-Transparência da informação
-Lei de Acesso à Informação
-LAI
-Inteligência artificial
-Ciência de dados"""
+SEARCH_TERMS_DISPLAY = get_terms_display()
+
+
+# ---------------------------------------------------------------------------
+# Utility: stem matching
+# ---------------------------------------------------------------------------
+
+def match_stems(text: str, stem_entries: list[dict], stem_patterns: list[re.Pattern]) -> set[str]:
+    """Return set of matched stem labels found in *text*."""
+    matched = set()
+    for entry, pattern in zip(stem_entries, stem_patterns):
+        if pattern.search(text):
+            radical = entry.get("radical", "")
+            matched.add(f"{radical}* (radical)")
+    return matched
+
+
+# ---------------------------------------------------------------------------
+# Utility: highlight (new — supports stems)
+# ---------------------------------------------------------------------------
+
+def highlight_all(text: str, exact_terms: list[str], stem_patterns: list[re.Pattern] = None) -> str:
+    """Highlight all exact-term and stem matches by merging overlapping spans."""
+    HIGHLIGHT_OPEN = '<span style="background-color:#FFFF00">'
+    HIGHLIGHT_CLOSE = '</span>'
+    spans = []
+    for term in exact_terms:
+        pat = re.compile(re.escape(term), re.IGNORECASE)
+        for m in pat.finditer(text):
+            spans.append((m.start(), m.end()))
+    if stem_patterns:
+        for pat in stem_patterns:
+            for m in pat.finditer(text):
+                spans.append((m.start(), m.end()))
+    if not spans:
+        return text
+    spans.sort()
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    for start, end in reversed(merged):
+        text = text[:start] + HIGHLIGHT_OPEN + text[start:end] + HIGHLIGHT_CLOSE + text[end:]
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Utility: context windows
+# ---------------------------------------------------------------------------
+
+def extract_context_windows(
+    text: str,
+    terms: list[str],
+    stem_patterns: list[re.Pattern] = None,
+    chars_before: int = 300,
+    chars_after: int = 300,
+    max_total: int = 2000,
+    merge_gap: int = 50,
+) -> str:
+    """Extract context windows around matches, merge overlapping ones, snap to word boundaries."""
+    # Collect all match spans
+    spans = []
+    for term in terms:
+        pat = re.compile(re.escape(term), re.IGNORECASE)
+        for m in pat.finditer(text):
+            spans.append((m.start(), m.end()))
+    if stem_patterns:
+        for pat in stem_patterns:
+            for m in pat.finditer(text):
+                spans.append((m.start(), m.end()))
+
+    # No matches — return first max_total chars at word boundary
+    if not spans:
+        if len(text) <= max_total:
+            return text
+        cut = text[:max_total]
+        sp = cut.rfind(' ')
+        if sp > max_total - 80:
+            cut = cut[:sp]
+        return cut + "\n[...]"
+
+    spans.sort()
+
+    # Build windows around each span
+    windows = []
+    for start, end in spans:
+        w_start = max(0, start - chars_before)
+        w_end = min(len(text), end + chars_after)
+        windows.append((w_start, w_end))
+
+    # Merge overlapping / close windows
+    merged = [windows[0]]
+    for w_start, w_end in windows[1:]:
+        prev_start, prev_end = merged[-1]
+        if w_start <= prev_end + merge_gap:
+            merged[-1] = (prev_start, max(prev_end, w_end))
+        else:
+            merged.append((w_start, w_end))
+
+    # Snap to word boundaries (find nearest space within 80 chars)
+    def snap_left(pos: int) -> int:
+        if pos == 0:
+            return 0
+        search_start = max(0, pos - 80)
+        idx = text.rfind(' ', search_start, pos)
+        if idx != -1:
+            return idx + 1
+        return pos
+
+    def snap_right(pos: int) -> int:
+        if pos >= len(text):
+            return len(text)
+        idx = text.find(' ', pos, min(pos + 80, len(text)))
+        if idx != -1:
+            return idx
+        return pos
+
+    snapped = [(snap_left(s), snap_right(e)) for s, e in merged]
+
+    # Assemble with separator, respecting max_total
+    parts = []
+    total_chars = 0
+    for s, e in snapped:
+        fragment = text[s:e]
+        if total_chars + len(fragment) > max_total and parts:
+            break
+        parts.append((s, e, fragment))
+        total_chars += len(fragment)
+
+    result_parts = []
+    first_start = parts[0][0] if parts else 0
+    if first_start > 10:
+        result_parts.append("[...]")
+
+    for i, (s, e, fragment) in enumerate(parts):
+        if i > 0:
+            result_parts.append("\n[...]\n")
+        result_parts.append(fragment)
+
+    last_end = parts[-1][1] if parts else 0
+    if last_end < len(text):
+        result_parts.append("\n[...]")
+
+    return "".join(result_parts)
+
+
+# ---------------------------------------------------------------------------
+# Utility: split compound acts
+# ---------------------------------------------------------------------------
+
+def split_compound_acts(item: dict, patterns: list[dict]) -> list[dict]:
+    """Split a compound act into sub-acts using split patterns from rules_engine."""
+    full_text = item.get("full_text")
+    if not full_text:
+        return [item]
+
+    for pat in patterns:
+        sep_re = pat.get("regex_separador_compiled")
+        if not sep_re:
+            continue
+        if not sep_re.search(full_text):
+            continue
+
+        # Split using the separator pattern
+        fragments = sep_re.split(full_text)
+        # Filter fragments < 50 chars
+        fragments = [f for f in fragments if len(f.strip()) >= 50]
+
+        if len(fragments) <= 1:
+            continue
+
+        # Build sub-acts
+        sub_acts = []
+        titulo_re = pat.get("titulo_regex_compiled")
+        original_title = item.get("title", "")
+        split_tipo = pat.get("tipo", "")
+
+        for idx, fragment in enumerate(fragments):
+            sub = deepcopy(item)
+            sub["full_text"] = fragment.strip()
+
+            # Try to extract title from fragment
+            if titulo_re:
+                m = titulo_re.search(fragment)
+                if m:
+                    sub["title"] = m.group(0).strip()
+                else:
+                    sub["title"] = f"{original_title} — Ato {idx + 1}"
+            else:
+                sub["title"] = f"{original_title} — Ato {idx + 1}"
+
+            # Tags
+            sub["split_from"] = original_title
+            sub["split_tipo"] = split_tipo
+            sub["split_index"] = idx
+            sub_acts.append(sub)
+
+        return sub_acts
+
+    return [item]
+
+
+# ---------------------------------------------------------------------------
+# Seção 2: rule matching and search
+# ---------------------------------------------------------------------------
+
+def matches_secao2_rule(text: str, rule: dict) -> bool:
+    """Check whether *text* matches a Seção 2 appointment rule."""
+    filtro = rule.get("filtro", {})
+
+    # texto_contem_qualquer — at least one term must match
+    contem = filtro.get("texto_contem_qualquer", [])
+    if contem:
+        found_any = False
+        for term in contem:
+            if re.search(re.escape(term), text, re.IGNORECASE):
+                found_any = True
+                break
+        if not found_any:
+            return False
+
+    # texto_nao_contem — none of these should match
+    nao_contem = filtro.get("texto_nao_contem", [])
+    for term in nao_contem:
+        if re.search(re.escape(term), text, re.IGNORECASE):
+            return False
+
+    # padrao_fc — regex pattern with expanded FC handling
+    padrao_fc = filtro.get("padrao_fc")
+    padrao_fc_compiled = filtro.get("padrao_fc_compiled")
+    if padrao_fc and not padrao_fc_compiled:
+        # Expand FC[- ]? to handle zero-padded FC-03 etc.
+        expanded = padrao_fc.replace("FC[- ]?", "FC[- ]*0*")
+        padrao_fc_compiled = re.compile(expanded, re.IGNORECASE | re.UNICODE)
+    if padrao_fc_compiled:
+        if not padrao_fc_compiled.search(text):
+            return False
+
+    return True
+
+
+def search_secao2(
+    date_str: str,
+    rules: list[dict],
+    seen_titles: set,
+    progress_callback=None,
+) -> list[dict]:
+    """Search Seção 2 for appointment acts matching configured rules."""
+    results = search_dou("Câmara dos Deputados", date_str, sections=["do2", "do2e"])
+    found_items = []
+
+    for item in results:
+        title = item["title"]
+        if title in seen_titles:
+            continue
+
+        # Fetch full text
+        full_text = fetch_full_text(item["href"])
+        if full_text:
+            item["full_text"] = full_text
+
+        text_to_check = full_text or item.get("abstract", "")
+        if not text_to_check:
+            continue
+
+        # Test each rule
+        for rule in rules:
+            if matches_secao2_rule(text_to_check, rule):
+                seen_titles.add(title)
+                item["found_by"] = rule.get("descricao", "Seção 2")
+                found_items.append(item)
+                break
+
+        time.sleep(0.5 + random() * 1.0)
+
+    return found_items
+
+
+# ---------------------------------------------------------------------------
+# Existing functions (preserved)
+# ---------------------------------------------------------------------------
 
 def clean_html(text: str) -> str:
     """Remove tags HTML."""
     return re.sub(r'<.*?>', '', text)
 
 
-def fetch_boletim_items(date: datetime, terms: list = None) -> list:
+def fetch_boletim_items(
+    date: datetime,
+    terms: list = None,
+    stem_entries: list[dict] = None,
+    stem_patterns: list[re.Pattern] = None,
+) -> list:
     """
     Baixa o Boletim Administrativo da Câmara, extrai o texto completo,
     busca os termos fornecidos (ou SEARCH_TERMS padrão) e retorna publicações
@@ -193,7 +411,12 @@ def fetch_boletim_items(date: datetime, terms: list = None) -> list:
         if pattern.search(full_clean):
             found_terms.add(term)
 
-    if not found_terms:
+    # Also check stems
+    stem_labels = set()
+    if stem_entries and stem_patterns:
+        stem_labels = match_stems(full_clean, stem_entries, stem_patterns)
+
+    if not found_terms and not stem_labels:
         logging.info(f"  BA {date.strftime('%d/%m/%Y')}: nenhum termo relevante encontrado")
         return []
 
@@ -202,6 +425,9 @@ def fetch_boletim_items(date: datetime, terms: list = None) -> list:
     # Limitar o texto a algo razoável
     if len(full_clean) > 5000:
         full_clean = full_clean[:5000] + "\n[...]"
+
+    # Combine exact terms and stem labels in found_by
+    combined_labels = sorted(found_terms) + sorted(stem_labels)
 
     found_items = [{
         "section": "BA",
@@ -214,10 +440,10 @@ def fetch_boletim_items(date: datetime, terms: list = None) -> list:
         "page": "",
         "hierarchy": "Câmara dos Deputados",
         "arttype": "Boletim Administrativo",
-        "found_by": ", ".join(sorted(found_terms)),
+        "found_by": ", ".join(combined_labels),
     }]
 
-    logging.info(f"  BA {date.strftime('%d/%m/%Y')}: {len(found_terms)} termos encontrados — entrada única consolidada")
+    logging.info(f"  BA {date.strftime('%d/%m/%Y')}: {len(found_terms)} termos + {len(stem_labels)} radicais encontrados — entrada única consolidada")
     return found_items
 
 
@@ -298,9 +524,16 @@ def fetch_full_text(url: str) -> Optional[str]:
 
     full = "\n".join(consolidated)
 
-    # Limitar a ~3000 chars para não explodir o email
-    if len(full) > 3000:
-        full = full[:3000] + "\n[...]"
+    # Limitar usando display config (default 5000)
+    display_cfg = get_display_config()
+    max_chars = display_cfg.get("relatorio_max_chars", 5000)
+    if len(full) > max_chars:
+        # Cut at word boundary
+        cut = full[:max_chars]
+        sp = cut.rfind(' ')
+        if sp > max_chars - 80:
+            cut = cut[:sp]
+        full = cut + "\n[...]"
 
     return full if full else None
 
@@ -396,11 +629,16 @@ def _parse_content(content: dict) -> dict:
     }
 
 
-def search_all_terms(terms: list, date_str: str, progress_callback=None) -> list:
+def search_all_terms(
+    terms: list,
+    date_str: str,
+    progress_callback=None,
+    secao2_rules: list[dict] = None,
+) -> list:
     """
     Busca todos os termos com lógica de seções:
     - Seção 1: todos os termos (com busca de ementa para atos normativos)
-    - Seção 2: ignorada (atos de nomeação)
+    - Seção 2: regras de nomeação configuradas (se secao2_rules fornecido)
     - Seção 3: apenas "Câmara dos Deputados"
 
     progress_callback(current, total, message): chamado a cada passo para reportar progresso.
@@ -410,7 +648,8 @@ def search_all_terms(terms: list, date_str: str, progress_callback=None) -> list
 
     # === SEÇÃO 3: apenas "Câmara dos Deputados" (só se estiver nos termos) ===
     buscar_secao3 = any(t.lower() == "câmara dos deputados" for t in terms)
-    total_steps = (1 if buscar_secao3 else 0) + len(terms)
+    buscar_secao2 = bool(secao2_rules)
+    total_steps = (1 if buscar_secao3 else 0) + (1 if buscar_secao2 else 0) + len(terms)
     current_step = 0
 
     if buscar_secao3:
@@ -424,6 +663,17 @@ def search_all_terms(terms: list, date_str: str, progress_callback=None) -> list
                 item["found_by"] = "Câmara dos Deputados"
                 all_items.append(item)
         logging.info(f"  -> {len(results)} resultado(s), {len(all_items)} novo(s)")
+        current_step += 1
+        time.sleep(1.0 + random() * 1.5)
+
+    # === SEÇÃO 2: regras de nomeação ===
+    if buscar_secao2:
+        logging.info("=== Seção 2: Buscando atos de nomeação (regras configuradas) ===")
+        if progress_callback:
+            progress_callback(current_step, total_steps, "Seção 2: atos de nomeação")
+        secao2_items = search_secao2(date_str, secao2_rules, seen_titles, progress_callback)
+        all_items.extend(secao2_items)
+        logging.info(f"  Seção 2: {len(secao2_items)} publicação(ões) encontrada(s)")
         current_step += 1
         time.sleep(1.0 + random() * 1.5)
 
@@ -473,6 +723,14 @@ def search_all_terms(terms: list, date_str: str, progress_callback=None) -> list
                 item["full_text"] = full_text
             time.sleep(0.5 + random() * 1.0)
 
+    # === Split compound acts ===
+    split_pats = get_split_patterns()
+    if split_pats:
+        expanded = []
+        for item in all_items:
+            expanded.extend(split_compound_acts(item, split_pats))
+        all_items = expanded
+
     # Ordenar por data de publicação
     all_items.sort(key=lambda x: x.get("date", ""))
 
@@ -481,7 +739,10 @@ def search_all_terms(terms: list, date_str: str, progress_callback=None) -> list
 
 
 def highlight_terms(text: str, terms: list) -> str:
-    """Aplica realce amarelo nos termos de busca encontrados no texto."""
+    """Aplica realce amarelo nos termos de busca encontrados no texto.
+
+    Kept for backward compatibility (app.py may still use it).
+    """
     for term in terms:
         pattern = re.compile(f'({re.escape(term)})', re.IGNORECASE)
         text = pattern.sub(
@@ -496,6 +757,7 @@ def generate_email_body(
     date_display: str,
     search_terms: list | None = None,
     terms_display: str | None = None,
+    stem_patterns: list[re.Pattern] = None,
 ) -> str:
     """
     Gera corpo de email HTML formatado:
@@ -511,6 +773,10 @@ def generate_email_body(
 
     _terms = search_terms if search_terms is not None else SEARCH_TERMS
     _terms_display = terms_display if terms_display is not None else SEARCH_TERMS_DISPLAY
+
+    # Display config
+    display_cfg = get_display_config()
+    relatorio_max_chars = display_cfg.get("relatorio_max_chars", 5000)
 
     # Termos para highlight (usa exatamente os termos configurados)
     highlight_list = list(_terms)
@@ -534,7 +800,9 @@ def generate_email_body(
         if item["section"] == "BA":
             meta = f'Publicado em: {e_date} | Boletim Administrativo da Câmara dos Deputados'
         else:
-            meta = f'Publicado em: {e_date} | Edição: {e_edition} | Seção: {e_section} | Página: {e_page}'
+            meta = f'Publicado em: {e_date} | Edição: {e_edition} | Seção: {e_section}'
+            if e_page:
+                meta += f' | Página: {e_page}'
         lines.append(f'<p style="{F}">{meta}</p>')
 
         # Órgão
@@ -546,13 +814,21 @@ def generate_email_body(
         # Texto da publicação
         full_text = item.get("full_text")
         if full_text:
+            # Truncate using display config limit
+            if len(full_text) > relatorio_max_chars:
+                cut = full_text[:relatorio_max_chars]
+                sp = cut.rfind(' ')
+                if sp > relatorio_max_chars - 80:
+                    cut = cut[:sp]
+                full_text = cut + "\n[...]"
+
             # Seção 1: mostrar texto com parágrafos consolidados e highlight
             for paragraph in full_text.split("\n"):
                 paragraph = paragraph.strip()
                 if paragraph:
                     # Escapar entidades HTML antes de aplicar highlight
                     paragraph = _html.escape(paragraph)
-                    paragraph = highlight_terms(paragraph, highlight_list)
+                    paragraph = highlight_all(paragraph, highlight_list, stem_patterns)
                     lines.append(f'<p style="{F}">{paragraph}</p>')
         else:
             # Seção 3 / fallback: usar abstract da API com highlight
@@ -566,7 +842,7 @@ def generate_email_body(
                     abstract = cut + "..."
             # Escapar entidades HTML antes de aplicar highlight (que injeta tags <span>)
             abstract = _html.escape(abstract)
-            abstract = highlight_terms(abstract, highlight_list)
+            abstract = highlight_all(abstract, highlight_list, stem_patterns)
             lines.append(f'<p style="{F}">{abstract}</p>')
 
         # Separador
@@ -590,18 +866,32 @@ def run_clipping(dates: list, output_dir: str = "."):
     """Executa o clipping para uma ou mais datas e salva um único HTML."""
     all_items = []
 
+    # Load stem data from rules_engine
+    stem_entries = get_stems()
+    stem_patterns = get_stem_patterns()
+
+    # Load secao2 rules from rules_engine
+    secao2_rules = get_secao2_rules()
+
     for date in dates:
         date_str = date.strftime("%d-%m-%Y")
         date_display = date.strftime("%d/%m/%Y")
 
         # DOU
         logging.info(f"=== Buscando DOU para {date_display} ===")
-        items = search_all_terms(SEARCH_TERMS, date_str)
+        items = search_all_terms(
+            SEARCH_TERMS, date_str,
+            secao2_rules=secao2_rules if secao2_rules else None,
+        )
         all_items.extend(items)
 
         # Boletim Administrativo
         logging.info(f"=== Buscando Boletim Administrativo para {date_display} ===")
-        ba_items = fetch_boletim_items(date)
+        ba_items = fetch_boletim_items(
+            date,
+            stem_entries=stem_entries,
+            stem_patterns=stem_patterns,
+        )
         all_items.extend(ba_items)
 
     # Ordenar tudo por data
@@ -617,7 +907,10 @@ def run_clipping(dates: list, output_dir: str = "."):
         title_display = f"{d0} a {d1.day}/{d1.month}/{d1.year}"
         file_suffix = f"{dates[0].strftime('%d%m%Y')}_{dates[-1].strftime('%d%m%Y')}"
 
-    html = generate_email_body(all_items, title_display)
+    html = generate_email_body(
+        all_items, title_display,
+        stem_patterns=stem_patterns,
+    )
 
     output_path = f"{output_dir}/DOU_{file_suffix}.htm"
     with open(output_path, "w", encoding="utf-8") as f:

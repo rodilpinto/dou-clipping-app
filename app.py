@@ -20,10 +20,23 @@ from dou_clipping import (
     generate_email_body,
     get_section_display,
     highlight_terms,
+    highlight_all,
+    extract_context_windows,
     search_all_terms,
 )
+from rules_engine import (
+    get_search_terms,
+    get_stems,
+    get_stem_patterns,
+    get_secao2_rules,
+    get_display_config,
+    get_terms_display,
+    get_llm_config,
+)
 
-APP_VERSION = "1.0"
+import time
+
+APP_VERSION = "2.0"
 APP_AUTHOR = "Rodrigo Pinto"
 
 # Estimativa de tempo manual por termo de busca (em segundos):
@@ -108,6 +121,10 @@ if "total_searches" not in st.session_state:
     st.session_state["total_searches"] = 0
 if "total_minutes_saved" not in st.session_state:
     st.session_state["total_minutes_saved"] = 0
+if "llm_classifications" not in st.session_state:
+    st.session_state["llm_classifications"] = []
+if "llm_filtered" not in st.session_state:
+    st.session_state["llm_filtered"] = False
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +344,42 @@ with st.sidebar:
             with st.spinner("Salvando no GitHub..."):
                 _save_terms_to_github(parsed)
 
+        st.divider()
+        if st.button("Sugerir novos termos com IA", use_container_width=True):
+            try:
+                api_key = st.secrets.get("GEMINI_API_KEY", "")
+                if not api_key:
+                    st.error("GEMINI_API_KEY não configurada nos Secrets.")
+                else:
+                    from llm_engine import LLMEngine
+
+                    llm_cfg = get_llm_config()
+                    engine = LLMEngine(
+                        api_key=api_key,
+                        provider=llm_cfg.get("provider", "gemini"),
+                        model=llm_cfg.get("modelo", "gemini-2.5-flash"),
+                    )
+                    with st.spinner("Consultando IA..."):
+                        suggestions = engine.enrich_terms(st.session_state["search_terms"])
+                    if suggestions:
+                        st.success(f"{len(suggestions)} sugestões recebidas!")
+                        for s in suggestions:
+                            col_add, col_text = st.columns([0.15, 0.85])
+                            with col_add:
+                                add_it = st.checkbox("", key=f"add_term_{s['termo']}", value=False)
+                            with col_text:
+                                st.markdown(
+                                    f"**{s['termo']}** ({s['categoria']})<br>"
+                                    f"<small>{s['justificativa']}</small>",
+                                    unsafe_allow_html=True,
+                                )
+                            if add_it and s["termo"] not in st.session_state["search_terms"]:
+                                st.session_state["search_terms"].append(s["termo"])
+                    else:
+                        st.warning("Nenhuma sugestão retornada.")
+            except Exception as e:
+                st.error(f"Erro: {e}")
+
 # ---------------------------------------------------------------------------
 # Busca
 # ---------------------------------------------------------------------------
@@ -372,12 +425,24 @@ if buscar and data_inicial <= data_final:
                 cb = make_progress_cb(date_idx, len(dates), date_display)
 
                 # Busca DOU
-                items = search_all_terms(st.session_state["search_terms"], date_str, progress_callback=cb)
+                secao2_rules = get_secao2_rules()
+                items = search_all_terms(
+                    st.session_state["search_terms"], date_str,
+                    progress_callback=cb,
+                    secao2_rules=secao2_rules if secao2_rules else None,
+                )
                 all_items.extend(items)
 
                 # Busca Boletim Administrativo
                 status_text.write(f"**BA {date_display}** - Buscando Boletim Administrativo...")
-                ba_items = fetch_boletim_items(date_obj, terms=st.session_state["search_terms"])
+                stem_entries = get_stems()
+                stem_patterns_list = get_stem_patterns()
+                ba_items = fetch_boletim_items(
+                    date_obj,
+                    terms=st.session_state["search_terms"],
+                    stem_entries=stem_entries,
+                    stem_patterns=stem_patterns_list,
+                )
                 all_items.extend(ba_items)
         except Exception as e:
             st.error(f"Erro durante a busca: {e}")
@@ -504,27 +569,43 @@ if st.session_state["search_done"] and results:
             with st.expander("Ver detalhes completos", expanded=False):
                 # Metadados
                 if item["section"] == "BA":
-                    st.markdown(
-                        f"**Data:** {item['date']} | **Boletim Administrativo da Câmara dos Deputados**"
-                    )
+                    st.markdown(f"**Data:** {item['date']} | **Boletim Administrativo da Câmara dos Deputados**")
                 else:
                     section_display = get_section_display(item["section"])
-                    st.markdown(
-                        f"**Data:** {item['date']} | "
-                        f"**Edição:** {item['edition']} | "
-                        f"**Seção:** {section_display} | "
-                        f"**Página:** {item['page']}"
-                    )
+                    page_str = f" | **Página:** {item['page']}" if item.get('page') else ""
+                    st.markdown(f"**Data:** {item['date']} | **Edição:** {item['edition']} | **Seção:** {section_display}{page_str}")
 
                 st.markdown(f"**Órgão:** {item['hierarchy']}")
                 st.markdown(f"**Link:** [{item['href']}]({item['href']})")
                 st.markdown(f"**Encontrado por:** `{found_by}`")
 
-                # Texto com highlight
+                # Texto com highlight — use context windows
+                display_cfg = get_display_config()
+                toggle_max = display_cfg.get("toggle_max_chars", 2000)
+                ctx_before = display_cfg.get("contexto_chars_antes", 300)
+                ctx_after = display_cfg.get("contexto_chars_depois", 300)
+
                 if full_text:
-                    text_html = highlight_terms(full_text.replace("\n", "<br>"), st.session_state["search_terms"])
+                    windowed = extract_context_windows(
+                        full_text,
+                        st.session_state["search_terms"],
+                        stem_patterns=get_stem_patterns(),
+                        chars_before=ctx_before,
+                        chars_after=ctx_after,
+                        max_total=toggle_max,
+                    )
+                    text_html = html_module.escape(windowed)
+                    text_html = text_html.replace("\n", "<br>")
+                    text_html = highlight_all(text_html, st.session_state["search_terms"], get_stem_patterns())
                 else:
-                    text_html = highlight_terms(clean_html(item.get("abstract", "")), st.session_state["search_terms"])
+                    text_html = highlight_all(
+                        html_module.escape(clean_html(item.get("abstract", ""))),
+                        st.session_state["search_terms"],
+                        get_stem_patterns(),
+                    )
+
+                # Style [...] markers
+                text_html = text_html.replace("[...]", '<span style="color:#999;font-style:italic">[...]</span>')
 
                 # Wrapper com estilo para o conteúdo HTML
                 styled_html = f"""
@@ -537,6 +618,92 @@ if st.session_state["search_done"] and results:
                 components.html(styled_html, height=300, scrolling=True)
 
         st.divider()
+
+    # -------------------------------------------------------------------
+    # LLM Filtering (Etapa 2 — optional)
+    # -------------------------------------------------------------------
+    st.divider()
+    col_llm, col_llm_info = st.columns([1, 3])
+    with col_llm:
+        filtrar_llm = st.button("Filtrar com IA", use_container_width=True)
+    with col_llm_info:
+        st.caption(
+            "Usa Gemini Flash 2.5 para classificar a relevância de cada resultado. "
+            "Itens filtrados ficam disponíveis para conferência."
+        )
+
+    if filtrar_llm:
+        try:
+            api_key = st.secrets.get("GEMINI_API_KEY", "")
+            if not api_key:
+                st.error("GEMINI_API_KEY não configurada nos Secrets.")
+            else:
+                from llm_engine import LLMEngine, load_guidelines
+
+                llm_cfg = get_llm_config()
+                engine = LLMEngine(
+                    api_key=api_key,
+                    provider=llm_cfg.get("provider", "gemini"),
+                    model=llm_cfg.get("modelo", "gemini-2.5-flash"),
+                )
+                guidelines = load_guidelines()
+
+                with st.status("Filtrando com IA...", expanded=True) as llm_status:
+                    progress_text = st.empty()
+                    classifications = []
+                    for idx, item in enumerate(results):
+                        progress_text.write(
+                            f"Analisando {idx+1}/{len(results)}: {item['title'][:50]}..."
+                        )
+                        cls = engine.filter_single(item, guidelines)
+                        cls["index"] = idx
+                        classifications.append(cls)
+                        if idx < len(results) - 1:
+                            time.sleep(1)
+
+                    # Apply: uncheck NAO_RELEVANTE
+                    for cls in classifications:
+                        if cls["classificacao"] == "NAO_RELEVANTE":
+                            st.session_state[f"sel_{cls['index']}"] = False
+
+                    st.session_state["llm_classifications"] = classifications
+                    st.session_state["llm_filtered"] = True
+
+                    n_relevant = sum(1 for c in classifications if c["classificacao"] == "RELEVANTE")
+                    n_partial = sum(1 for c in classifications if c["classificacao"] == "PARCIALMENTE_RELEVANTE")
+                    n_irrelevant = sum(1 for c in classifications if c["classificacao"] == "NAO_RELEVANTE")
+
+                    llm_status.update(
+                        label=f"Filtragem concluída — {n_relevant} relevantes, {n_partial} parciais, {n_irrelevant} filtrados",
+                        state="complete",
+                    )
+                st.rerun()
+        except Exception as e:
+            st.error(f"Erro na filtragem por LLM: {e}")
+
+    # Show filtered items (if LLM filtering was done)
+    if st.session_state.get("llm_filtered"):
+        classifications = st.session_state.get("llm_classifications", [])
+        filtered_items = [
+            (cls, results[cls["index"]])
+            for cls in classifications
+            if cls["classificacao"] == "NAO_RELEVANTE" and cls["index"] < len(results)
+        ]
+        if filtered_items:
+            with st.expander(f"Filtrados pelo LLM ({len(filtered_items)} itens)", expanded=False):
+                for cls, fitem in filtered_items:
+                    st.markdown(
+                        f"**{fitem['title']}**\n\n"
+                        f"<small style='color:#666'>"
+                        f"Justificativa: {html_module.escape(cls['justificativa'])} "
+                        f"(confiança: {cls['confianca']:.0%})"
+                        f"</small>",
+                        unsafe_allow_html=True,
+                    )
+                    idx = cls["index"]
+                    if st.checkbox(f"Re-incluir: {fitem['title'][:40]}...", key=f"reinclude_{idx}", value=False):
+                        st.session_state[f"sel_{idx}"] = True
+                    st.divider()
 
     # -------------------------------------------------------------------
     # Geração do email
@@ -568,6 +735,7 @@ if st.session_state["search_done"] and results:
                     date_display,
                     search_terms=st.session_state["search_terms"],
                     terms_display="\n".join(st.session_state["search_terms"]),
+                    stem_patterns=get_stem_patterns(),
                 )
                 st.session_state["email_html"] = email_html
                 st.success(f"Relatório gerado com {len(selected_items)} publicação(ões).")
